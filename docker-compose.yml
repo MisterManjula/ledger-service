@@ -1,0 +1,41 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ledger
+      POSTGRES_PASSWORD: ledger
+      POSTGRES_DB: ledger
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ledger -d ledger"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ledger
+      DB_USER: ledger
+      DB_PASSWORD: ledger
+      # The built-in server is single-process by default. Forking workers lets the
+      # concurrency test drive the real HTTP surface instead of bypassing it.
+      PHP_CLI_SERVER_WORKERS: "4"
+    volumes:
+      # Source is bind-mounted so edits apply without a rebuild. The named volume
+      # keeps the image's vendor/ from being shadowed by the host directory —
+      # which means a composer.json change needs `docker compose up --build`.
+      - .:/app
+      - vendor:/app/vendor
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  db-data:
+  vendor:

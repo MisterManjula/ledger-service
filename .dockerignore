@@ -1,0 +1,8 @@
+.git/
+.gitignore
+vendor/
+.env
+.phpunit.result.cache
+.phpunit.cache/
+docs/
+README.md

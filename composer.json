@@ -1,0 +1,27 @@
+{
+    "name": "ledger/ledger-service",
+    "description": "Double-entry ledger where a negative balance is structurally impossible",
+    "type": "project",
+    "license": "MIT",
+    "require": {
+        "php": "^8.3",
+        "ext-pdo": "*",
+        "ext-json": "*"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^11.5"
+    },
+    "autoload": {
+        "psr-4": {
+            "Ledger\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Ledger\\Tests\\": "tests/"
+        }
+    },
+    "config": {
+        "sort-packages": true
+    }
+}
