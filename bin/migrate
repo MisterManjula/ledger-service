@@ -1,0 +1,42 @@
+#!/bin/sh
+# Applies every db/migrations/*.sql that has not been applied yet, in filename
+# order, recording each in schema_migrations.
+#
+# Deliberately psql and not PHP: at this point the service has no database code
+# of its own, and a migration runner that shares the application's connection
+# layer cannot be used to fix that layer's own schema.
+set -eu
+
+PGHOST="${DB_HOST:-db}"
+PGPORT="${DB_PORT:-5432}"
+PGDATABASE="${DB_NAME:-ledger}"
+PGUSER="${DB_USER:-ledger}"
+PGPASSWORD="${DB_PASSWORD:-}"
+export PGHOST PGPORT PGDATABASE PGUSER PGPASSWORD
+
+root="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
+
+psql -v ON_ERROR_STOP=1 -q -c 'SET client_min_messages = warning;' -c 'CREATE TABLE IF NOT EXISTS schema_migrations (
+    version    text PRIMARY KEY,
+    applied_at timestamptz NOT NULL DEFAULT now()
+);'
+
+applied_any=0
+for file in "$root"/db/migrations/*.sql; do
+    version="$(basename "$file" .sql)"
+
+    if [ -n "$(psql -tAc "SELECT 1 FROM schema_migrations WHERE version = '$version'")" ]; then
+        continue
+    fi
+
+    # The migration and the row recording it commit together, so a migration
+    # that fails halfway leaves neither schema changes nor a version marker.
+    psql -v ON_ERROR_STOP=1 -q --single-transaction \
+        -f "$file" \
+        -c "INSERT INTO schema_migrations (version) VALUES ('$version')"
+
+    echo "migrate: applied $version"
+    applied_any=1
+done
+
+[ "$applied_any" -eq 1 ] || echo "migrate: nothing to apply"

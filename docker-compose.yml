@@ -26,6 +26,9 @@ services:
       # The built-in server is single-process by default. Forking workers lets the
       # concurrency test drive the real HTTP surface instead of bypassing it.
       PHP_CLI_SERVER_WORKERS: "4"
+      # Demo accounts on every start. Correct only because this compose file
+      # describes a throwaway environment; see docker/entrypoint.sh.
+      SEED_ON_START: "true"
     volumes:
       # Source is bind-mounted so edits apply without a rebuild. The named volume
       # keeps the image's vendor/ from being shadowed by the host directory —

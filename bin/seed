@@ -1,0 +1,15 @@
+#!/bin/sh
+# Loads the demo accounts. Safe to run repeatedly; see db/seed.sql.
+set -eu
+
+PGHOST="${DB_HOST:-db}"
+PGPORT="${DB_PORT:-5432}"
+PGDATABASE="${DB_NAME:-ledger}"
+PGUSER="${DB_USER:-ledger}"
+PGPASSWORD="${DB_PASSWORD:-}"
+export PGHOST PGPORT PGDATABASE PGUSER PGPASSWORD
+
+root="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
+
+psql -v ON_ERROR_STOP=1 -q --single-transaction -f "$root/db/seed.sql"
+echo "seed: demo accounts loaded"
