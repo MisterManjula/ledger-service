@@ -6,6 +6,7 @@ namespace Ledger;
 
 use PDO;
 use PDOException;
+use RuntimeException;
 use Throwable;
 
 /**
@@ -29,10 +30,9 @@ final class TransferService
     }
 
     /**
-     * @return array{id: string, from: string, to: string, amount: int, currency: string, created_at: string}
      * @throws TransferRejected
      */
-    public function execute(TransferRequest $request): array
+    public function execute(TransferRequest $request): TransferResult
     {
         $transferId = Uuid::generate();
 
@@ -50,17 +50,96 @@ final class TransferService
                 $this->pdo->rollBack();
             }
 
+            // The key was taken. Note what is not here: a SELECT before the
+            // insert, asking whether this key has been seen. Two simultaneous
+            // retries would both find nothing and both proceed. Attempting the
+            // insert instead makes the unique index the arbiter, exactly as the
+            // CHECK constraint is the arbiter of the balance.
+            if ($exception instanceof PDOException && $this->isDuplicateIdempotencyKey($exception)) {
+                return $this->replay($request);
+            }
+
             throw $exception instanceof PDOException
                 ? $this->translate($exception)
                 : $exception;
         }
 
+        return new TransferResult(
+            $this->describe($transferId, $request->fromAccountId, $request->toAccountId, $request->amount, $request->currency, $createdAt),
+            replayed: false,
+        );
+    }
+
+    /**
+     * The key has been used before. Whether that is a retry or a collision is
+     * decided by the fingerprint, not by the key (ADR-002).
+     *
+     * Reaching here means the losing insert already waited: PostgreSQL blocks a
+     * conflicting insert until the transaction holding the key commits or aborts,
+     * so by the time 23505 is raised the winning row is committed and visible to
+     * the read below. There is no window in which the key is taken but the row
+     * cannot be found.
+     *
+     * @throws TransferRejected
+     */
+    private function replay(TransferRequest $request): TransferResult
+    {
+        $statement = $this->pdo->prepare(
+            'SELECT id, request_fingerprint, from_account_id, to_account_id, amount, currency, created_at
+               FROM transfers
+              WHERE idempotency_key = :idempotency_key'
+        );
+        $statement->execute(['idempotency_key' => $request->idempotencyKey]);
+
+        $existing = $statement->fetch();
+
+        if ($existing === false) {
+            throw new RuntimeException(
+                'Idempotency key ' . $request->idempotencyKey . ' collided but no transfer holds it'
+            );
+        }
+
+        // Same key, different request. Returning the first result here would let
+        // a client silently receive the outcome of a transfer it did not ask for,
+        // which is the failure mode ADR-002 exists to refuse.
+        if ($existing['request_fingerprint'] !== $request->fingerprint()) {
+            throw new TransferRejected('idempotency_key_conflict');
+        }
+
+        return new TransferResult(
+            $this->describe(
+                $existing['id'],
+                $existing['from_account_id'],
+                $existing['to_account_id'],
+                (int) $existing['amount'],
+                $existing['currency'],
+                $existing['created_at'],
+            ),
+            replayed: true,
+        );
+    }
+
+    /**
+     * The one place a transfer is turned into a response body, used by both the
+     * committed path and the replayed one. §4 requires the two to be identical,
+     * and two separate literals would eventually stop being so.
+     *
+     * @return array{id: string, from: string, to: string, amount: int, currency: string, created_at: string}
+     */
+    private function describe(
+        string $id,
+        string $from,
+        string $to,
+        int $amount,
+        string $currency,
+        string $createdAt,
+    ): array {
         return [
-            'id' => $transferId,
-            'from' => $request->fromAccountId,
-            'to' => $request->toAccountId,
-            'amount' => $request->amount,
-            'currency' => $request->currency,
+            'id' => $id,
+            'from' => $from,
+            'to' => $to,
+            'amount' => $amount,
+            'currency' => $currency,
             'created_at' => $createdAt,
         ];
     }
@@ -193,14 +272,17 @@ final class TransferService
             return new TransferRejected('insufficient_funds');
         }
 
-        // Step 6 splits this: an identical payload becomes a 200 replay, and only
-        // a genuinely different one stays a conflict. Until then every reuse of a
-        // key is reported as a conflict, which is the wrong answer for a retry
-        // but never the wrong answer about the money.
-        if ($sqlState === self::UNIQUE_VIOLATION && str_contains($message, 'idempotency_key')) {
-            return new TransferRejected('idempotency_key_reused');
-        }
-
         return $exception;
+    }
+
+    /**
+     * Narrowed to the one unique index a transfer can realistically collide on.
+     * A duplicate primary key would be a uuid collision, which is a fault and
+     * must not be mistaken for a retry.
+     */
+    private function isDuplicateIdempotencyKey(PDOException $exception): bool
+    {
+        return ($exception->errorInfo[0] ?? null) === self::UNIQUE_VIOLATION
+            && str_contains($exception->getMessage(), 'transfers_idempotency_key_key');
     }
 }

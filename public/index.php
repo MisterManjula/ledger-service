@@ -75,13 +75,19 @@ function createTransfer(): array
     $transfers = new TransferService(Database::connect());
 
     try {
-        return [201, $transfers->execute($request)];
+        $result = $transfers->execute($request);
+
+        // 201 for a transfer that moved money, 200 for one that had already
+        // moved it. The body is the same either way: the status is the only
+        // place the difference is reported, so a client that ignores it still
+        // reads a correct result.
+        return [$result->replayed ? 200 : 201, $result->transfer];
     } catch (TransferRejected $exception) {
         // The ledger understood the request and refused it. Which number that is
         // reported as is decided here, so that the service layer stays free of
         // HTTP.
         $status = match ($exception->reason) {
-            'idempotency_key_reused' => 409,
+            'idempotency_key_conflict' => 409,
             default => 422,
         };
 
