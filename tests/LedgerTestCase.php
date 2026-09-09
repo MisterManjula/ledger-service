@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Ledger\Tests;
 
+use CurlHandle;
 use Ledger\AccountRepository;
 use Ledger\Database;
 use Ledger\Uuid;
@@ -127,28 +128,87 @@ abstract class LedgerTestCase extends TestCase
         return $this->request('GET', '/accounts/' . $accountId);
     }
 
+    protected function countTransfersWithKey(string $idempotencyKey): int
+    {
+        $statement = $this->pdo()->prepare(
+            'SELECT count(*) FROM transfers WHERE idempotency_key = :key'
+        );
+        $statement->execute(['key' => $idempotencyKey]);
+
+        return (int) $statement->fetchColumn();
+    }
+
+    protected function countEntriesForKey(string $idempotencyKey): int
+    {
+        $statement = $this->pdo()->prepare(
+            'SELECT count(*)
+               FROM entries e
+               JOIN transfers t ON t.id = e.transfer_id
+              WHERE t.idempotency_key = :key'
+        );
+        $statement->execute(['key' => $idempotencyKey]);
+
+        return (int) $statement->fetchColumn();
+    }
+
+    /**
+     * The same request fired N times at once, on N connections.
+     *
+     * curl_multi rather than a loop, because a sequential retry would pass even
+     * if the replay path contained a race: the first request would always have
+     * committed before the second began. Removing that guarantee is the entire
+     * purpose of this helper.
+     *
+     * The app container runs the built-in server with PHP_CLI_SERVER_WORKERS=4,
+     * so at most four of these are ever truly simultaneous. That is enough to
+     * overlap, which is what the assertions depend on.
+     *
+     * @param array<string, mixed> $body
+     * @return list<array{status: int, body: array<string, mixed>}>
+     */
+    protected function postTransferConcurrently(array $body, string $idempotencyKey, int $times): array
+    {
+        $multi = curl_multi_init();
+        $handles = [];
+
+        for ($i = 0; $i < $times; $i++) {
+            $handle = $this->createHandle('POST', '/transfers', $body, $idempotencyKey);
+            $handles[] = $handle;
+            curl_multi_add_handle($multi, $handle);
+        }
+
+        do {
+            $status = curl_multi_exec($multi, $running);
+
+            if ($running) {
+                curl_multi_select($multi);
+            }
+        } while ($running && $status === CURLM_OK);
+
+        $responses = [];
+
+        foreach ($handles as $handle) {
+            $responses[] = [
+                'status' => (int) curl_getinfo($handle, CURLINFO_RESPONSE_CODE),
+                'body' => json_decode((string) curl_multi_getcontent($handle), true, 8, JSON_THROW_ON_ERROR),
+            ];
+
+            curl_multi_remove_handle($multi, $handle);
+            curl_close($handle);
+        }
+
+        curl_multi_close($multi);
+
+        return $responses;
+    }
+
     /**
      * @param array<string, mixed>|null $body
      * @return array{status: int, body: array<string, mixed>}
      */
     private function request(string $method, string $path, ?array $body = null, ?string $idempotencyKey = null): array
     {
-        $handle = curl_init($this->baseUrl() . $path);
-        $headers = ['Accept: application/json'];
-
-        curl_setopt($handle, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($handle, CURLOPT_CUSTOMREQUEST, $method);
-
-        if ($body !== null) {
-            $headers[] = 'Content-Type: application/json';
-            curl_setopt($handle, CURLOPT_POSTFIELDS, json_encode($body, JSON_THROW_ON_ERROR));
-        }
-
-        if ($idempotencyKey !== null) {
-            $headers[] = 'Idempotency-Key: ' . $idempotencyKey;
-        }
-
-        curl_setopt($handle, CURLOPT_HTTPHEADER, $headers);
+        $handle = $this->createHandle($method, $path, $body, $idempotencyKey);
 
         $response = curl_exec($handle);
         $status = (int) curl_getinfo($handle, CURLINFO_RESPONSE_CODE);
@@ -161,5 +221,32 @@ abstract class LedgerTestCase extends TestCase
             'status' => $status,
             'body' => json_decode((string) $response, true, 8, JSON_THROW_ON_ERROR),
         ];
+    }
+
+    /**
+     * @param array<string, mixed>|null $body
+     */
+    private function createHandle(string $method, string $path, ?array $body, ?string $idempotencyKey): CurlHandle
+    {
+        $handle = curl_init($this->baseUrl() . $path);
+        $headers = ['Accept: application/json'];
+
+        curl_setopt($handle, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($handle, CURLOPT_CUSTOMREQUEST, $method);
+
+        if ($body !== null) {
+            $headers[] = 'Content-Type: application/json';
+            // Encoded from the array as given, so a test can vary key order to
+            // prove the fingerprint does not depend on it.
+            curl_setopt($handle, CURLOPT_POSTFIELDS, json_encode($body, JSON_THROW_ON_ERROR));
+        }
+
+        if ($idempotencyKey !== null) {
+            $headers[] = 'Idempotency-Key: ' . $idempotencyKey;
+        }
+
+        curl_setopt($handle, CURLOPT_HTTPHEADER, $headers);
+
+        return $handle;
     }
 }
