@@ -10,6 +10,11 @@
             <directory>tests</directory>
         </testsuite>
     </testsuites>
+    <php>
+        <!-- The suite drives the running service over HTTP. Overridable so it
+             can be pointed at a container from the host, or the reverse. -->
+        <env name="LEDGER_BASE_URL" value="http://localhost:8080"/>
+    </php>
     <source>
         <include>
             <directory>src</directory>
