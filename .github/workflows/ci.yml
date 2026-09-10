@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test suite against the real stack
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same entry point as the README. The suite drives the service over HTTP
+      # and reads PostgreSQL directly, so it needs the whole stack, not a build.
+      - name: Start the stack
+        run: docker compose up --build --detach
+
+      # Compose only knows the container is running. The entrypoint applies
+      # migrations before the server listens, so wait for a real HTTP answer;
+      # any status code will do, only "no connection" (000) means not ready.
+      - name: Wait for the API
+        run: |
+          for attempt in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' \
+              http://localhost:8080/accounts/00000000-0000-0000-0000-000000000000 || true)
+            if [ "$code" != "000" ]; then
+              echo "API is up (HTTP $code)"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "API did not come up within 60s"
+          exit 1
+
+      - name: Run PHPUnit
+        run: docker compose exec -T app vendor/bin/phpunit
+
+      - name: Show service logs
+        if: failure()
+        run: docker compose logs
+
+      - name: Tear down
+        if: always()
+        run: docker compose down --volumes
