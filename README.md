@@ -1,5 +1,7 @@
 # Ledger service
 
+![CI](https://github.com/MisterManjula/ledger-service/actions/workflows/ci.yml/badge.svg)
+
 A minimal double-entry ledger built around two guarantees that hold regardless of
 what the calling code does.
 
