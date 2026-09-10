@@ -25,7 +25,11 @@ services:
       DB_PASSWORD: ledger
       # The built-in server is single-process by default. Forking workers lets the
       # concurrency test drive the real HTTP surface instead of bypassing it.
-      PHP_CLI_SERVER_WORKERS: "4"
+      # Matched to that test's attempt count: each worker serves one request at a
+      # time, so this is the ceiling on how many transactions can genuinely reach
+      # the same row at once. At 4 the test was observed to miss a deliberately
+      # broken implementation once in seven runs; at 20 it did not.
+      PHP_CLI_SERVER_WORKERS: "20"
       # Demo accounts on every start. Correct only because this compose file
       # describes a throwaway environment; see docker/entrypoint.sh.
       SEED_ON_START: "true"

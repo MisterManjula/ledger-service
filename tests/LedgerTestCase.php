@@ -159,20 +159,39 @@ abstract class LedgerTestCase extends TestCase
      * committed before the second began. Removing that guarantee is the entire
      * purpose of this helper.
      *
-     * The app container runs the built-in server with PHP_CLI_SERVER_WORKERS=4,
-     * so at most four of these are ever truly simultaneous. That is enough to
-     * overlap, which is what the assertions depend on.
-     *
      * @param array<string, mixed> $body
      * @return list<array{status: int, body: array<string, mixed>}>
      */
     protected function postTransferConcurrently(array $body, string $idempotencyKey, int $times): array
     {
+        return $this->postTransfersInParallel(
+            array_fill(0, $times, ['body' => $body, 'key' => $idempotencyKey]),
+        );
+    }
+
+    /**
+     * Different requests fired at once, each with its own idempotency key.
+     *
+     * Distinct keys are the point: reusing one would make every request after
+     * the first a replay, and the suite would be measuring deduplication rather
+     * than contention.
+     *
+     * How many of these are genuinely simultaneous is bounded by
+     * PHP_CLI_SERVER_WORKERS in docker-compose.yml, since each worker serves one
+     * request at a time. The assertions do not depend on the number: they depend
+     * on more than one transaction reaching the same row at once, which any
+     * value above 1 provides.
+     *
+     * @param list<array{body: array<string, mixed>, key: string}> $requests
+     * @return list<array{status: int, body: array<string, mixed>}>
+     */
+    protected function postTransfersInParallel(array $requests): array
+    {
         $multi = curl_multi_init();
         $handles = [];
 
-        for ($i = 0; $i < $times; $i++) {
-            $handle = $this->createHandle('POST', '/transfers', $body, $idempotencyKey);
+        foreach ($requests as $request) {
+            $handle = $this->createHandle('POST', '/transfers', $request['body'], $request['key']);
             $handles[] = $handle;
             curl_multi_add_handle($multi, $handle);
         }
