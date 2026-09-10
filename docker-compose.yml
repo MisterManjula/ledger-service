@@ -8,10 +8,34 @@ services:
     volumes:
       - db-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ledger -d ledger"]
-      interval: 2s
-      timeout: 2s
-      retries: 15
+      # Probed over TCP, not the Unix socket, and that is the whole point.
+      #
+      # While the image initialises it runs a temporary server that listens on
+      # the socket only. A socket probe therefore reports healthy during
+      # initialisation — before POSTGRES_DB has been created — and the app,
+      # which connects over TCP, starts against a port nothing is listening on.
+      # The TCP probe stays red until the real server binds, which happens after
+      # initialisation has finished and `ledger` exists.
+      #
+      # Deliberately pg_isready and not `psql -c 'SELECT 1'`. The heavier probe
+      # opens a backend session; when those arrive every couple of seconds during
+      # the temporary server's `pg_ctl stop -m fast`, the shutdown never
+      # completes, the entrypoint reports "server does not shut down" and the
+      # container exits 1 on first boot. That was observed, not theorised.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ledger -d ledger"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      # Cold initdb on a fresh volume takes longer than the retry budget above,
+      # and without a start_period those attempts count as failures: the
+      # container is declared unhealthy while it is still legitimately starting.
+      # CI always starts from an empty volume, so this is the difference between
+      # a green build and one that never gets past this step.
+      #
+      # 60s is generous for a Linux host, where initdb takes seconds. It is
+      # deliberately not tuned to a slow Docker Desktop volume: padding this to
+      # cover a degraded workstation would hide a genuinely stuck database in CI.
+      start_period: 60s
 
   app:
     build: .
@@ -39,6 +63,18 @@ services:
       # which means a composer.json change needs `docker compose up --build`.
       - .:/app
       - vendor:/app/vendor
+    # Lets `docker compose up --wait` return only once the API actually answers,
+    # rather than once the container has started. The suite talks HTTP, so
+    # "started" is not the condition it needs; CI depends on this, and locally it
+    # replaces polling curl by hand.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8080/"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      # The entrypoint migrates and seeds before the server binds, so early
+      # failures here are expected rather than meaningful.
+      start_period: 10s
     depends_on:
       db:
         condition: service_healthy
